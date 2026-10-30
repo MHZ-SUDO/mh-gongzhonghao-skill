@@ -1,0 +1,7 @@
+interface:
+  display_name: "mh公众号skill"
+  short_description: "精剪讲解视频、制作系列封面字幕与配套Word，并按授权完成公众号视频和图文发表"
+  default_prompt: "使用 $mh-gongzhonghao-skill 处理本期公众号内容，按我要求完成视频、封面、字幕、配套Word或发表。"
+
+policy:
+  allow_implicit_invocation: true

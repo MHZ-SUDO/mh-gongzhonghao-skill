@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "mode": "video_and_article",
+  "episode": "04",
+  "title": "第04期_替换为本期真实主题",
+  "account_name": "替换为本期真实公众号名称",
+  "collection": "替换为本期真实合集名称",
+  "video": "<本期成片目录绝对路径>/第04期_本期主题_精剪版.mp4",
+  "article": "<本期成片目录绝对路径>/第04期_本期主题_公众号配套.docx",
+  "cover": "<本期成片目录绝对路径>/第04期_本期主题_封面.png",
+  "reference_recordings": [],
+  "authorization": {
+    "requested_action": "prepare",
+    "user_instruction": "这是配置示例；实际操作时替换为用户当次要求原文。"
+  },
+  "settings": {
+    "group_notify": false,
+    "schedule": null,
+    "sync_video_channel": true,
+    "original_author": "替换为已确认原创作者"
+  }
+}

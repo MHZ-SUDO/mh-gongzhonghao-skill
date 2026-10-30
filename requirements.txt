@@ -1,0 +1,7 @@
+# Install only what the requested mode needs; media_tools uses the standard library.
+Pillow
+lxml
+python-docx
+PyMuPDF
+pywin32; sys_platform == "win32"
+# Optional local speech recognition: faster-whisper, with an available local model.
