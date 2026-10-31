@@ -9,6 +9,10 @@
   "article": "<本期成片目录绝对路径>/第04期_本期主题_公众号配套.docx",
   "cover": "<本期成片目录绝对路径>/第04期_本期主题_封面.png",
   "reference_recordings": [],
+  "upload_limits": {
+    "video_duration_less_than_seconds": 3600,
+    "docx_conservative_max_bytes": 15000000
+  },
   "authorization": {
     "requested_action": "prepare",
     "user_instruction": "这是配置示例；实际操作时替换为用户当次要求原文。"

@@ -155,7 +155,7 @@ def asset_path(value: Any, name: str) -> Path:
     return path
 
 
-def publish_intent(authorization: dict[str, Any]) -> tuple[bool, str]:
+def publish_intent(authorization: dict[str, Any], intended_kinds: set[str] | None = None) -> tuple[bool, str]:
     """Reject obvious placeholders/prepare-only requests, never prove user intent.
 
     The caller asserts ``publish`` only after checking the current conversation.
@@ -179,8 +179,23 @@ def publish_intent(authorization: dict[str, Any]) -> tuple[bool, str]:
         r"\b(?:do not|don't|never)\s+(?:publish|post)\b",
         r"\b(?:prepare|review|inspect)\s+only\b",
     )
-    if any(re.search(pattern, lowered) for pattern in negative):
-        return False, "用户原话含不发布或仅准备的限制。"
+    for pattern in negative:
+        for match in re.finditer(pattern, lowered):
+            # Preserve the actual quote: “发表视频，图文不要发表” authorizes
+            # video while explicitly restricting the other type. Unqualified
+            # restrictions still block every type. This guard never replaces
+            # the caller's interpretation of the current conversation.
+            boundary = r"[，,。.;；！？!?\n]|\b(?:but|while)\b|但是|不过|但"
+            clause = (re.split(boundary, lowered[:match.start()])[-1]
+                      + match.group() + re.split(boundary, lowered[match.end():])[0])
+            mentioned = set()
+            if re.search(r"视频|\bvideo\b", clause):
+                mentioned.add("video")
+            if re.search(r"图文|文章|\barticles?\b", clause):
+                mentioned.add("article")
+            if intended_kinds and mentioned and mentioned.isdisjoint(intended_kinds):
+                continue
+            return False, "用户原话含当前类型不发布或仅准备的限制。"
     meta_creation = re.search(
         r"(?:创建|编写|制作|生成|设计|完善|开发|安装|写|做).{0,35}"
         r"(?:skill|技能|脚本|workflow|工作流|流程|自动化|教程)|"
@@ -192,7 +207,7 @@ def publish_intent(authorization: dict[str, Any]) -> tuple[bool, str]:
     return True, "publish标记附有非占位用户原话；助手仍须从当次会话核实授权，本脚本不能证明意图。"
 
 
-def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+def validate_config(config: dict[str, Any], preserved_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
     required(config, ("schema_version", "mode", "episode", "title", "account_name",
                       "collection", "authorization", "settings"), "config")
     if type(config["schema_version"]) is not int or config["schema_version"] != 1:
@@ -200,8 +215,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config["mode"], str) or config["mode"] not in MODES:
         raise WorkflowError("mode", f"mode必须为：{', '.join(sorted(MODES))}")
     normalized = dict(config)
-    for key in ("episode", "title", "account_name", "collection"):
+    for key in ("episode", "title", "account_name"):
         normalized[key] = nonempty_string(config[key], key)
+    normalized["collection"] = (None if config["collection"] is None
+                                else nonempty_string(config["collection"], "collection"))
     authorization = config["authorization"]
     settings = config["settings"]
     if not isinstance(authorization, dict) or not isinstance(settings, dict):
@@ -223,18 +240,39 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["settings"] = {
         "group_notify": False, "schedule": None,
         "sync_video_channel": settings["sync_video_channel"],
-        "original_author": nonempty_string(settings["original_author"], "original_author"),
+        "original_author": (None if settings["original_author"] is None
+                            else nonempty_string(settings["original_author"], "original_author")),
     }
-    paths = {}
-    for key in ("video", "article", "cover"):
-        if config.get(key) is not None:
-            paths[key] = asset_path(config[key], key)
+    limits = config.get("upload_limits", {})
+    if not isinstance(limits, dict):
+        raise WorkflowError("upload_limits", "upload_limits必须为对象。")
+    duration_limit = limits.get("video_duration_less_than_seconds", 3600)
+    article_limit = limits.get("docx_conservative_max_bytes", 15_000_000)
+    if (type(duration_limit) not in {int, float} or not math.isfinite(duration_limit)
+            or duration_limit <= 0 or type(article_limit) is not int or article_limit <= 0):
+        raise WorkflowError("upload_limits", "视频阈值须为正有限秒数，DOCX阈值须为正整数字节数。")
+    normalized["upload_limits"] = {
+        "video_duration_less_than_seconds": duration_limit,
+        "docx_conservative_max_bytes": article_limit,
+    }
     requirements = {
         "video_and_article": {"video", "article", "cover"},
         "video_only": {"video", "cover"},
         "article_only": {"article", "cover"},
         "prepare_only": {"cover"},
     }[config["mode"]]
+    selected = {"video", "article", "cover"} if config["mode"] == "prepare_only" else requirements
+    paths = {}
+    for key in sorted(selected):
+        if config.get(key) is not None:
+            if preserved_inputs and key in preserved_inputs:
+                candidate = Path(nonempty_string(config[key], key))
+                previous = Path(preserved_inputs[key]["path"])
+                if not candidate.is_absolute() or candidate.resolve() != previous.resolve():
+                    raise WorkflowError("locked_asset_changed", f"已提交/认领的{key}不能更换素材路径。")
+                paths[key] = previous
+            else:
+                paths[key] = asset_path(config[key], key)
     if config["mode"] == "prepare_only" and not ({"video", "article"} & paths.keys()):
         raise WorkflowError("missing_asset", "prepare_only仍需提供video或article，及cover。")
     missing = requirements - paths.keys()
@@ -248,7 +286,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def inspect_video(path: Path) -> dict[str, Any]:
+def inspect_video(path: Path, duration_limit: float = 3600) -> dict[str, Any]:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         raise WorkflowError("dependency", "未找到ffprobe，请将它加入PATH。")
@@ -271,10 +309,10 @@ def inspect_video(path: Path) -> dict[str, Any]:
         stream = videos[0]
         duration = float(probe.get("format", {}).get("duration", stream.get("duration", 0)))
         width, height = int(stream.get("width", 0)), int(stream.get("height", 0))
-        if not math.isfinite(duration) or not 0 < duration < 3600 or min(width, height) <= 0:
-            raise ValueError("视频时长应大于0且小于1小时，分辨率须有效")
+        if not math.isfinite(duration) or not 0 < duration < duration_limit or min(width, height) <= 0:
+            raise ValueError(f"视频时长应大于0且小于配置阈值{duration_limit}秒，分辨率须有效")
     except (ValueError, TypeError, KeyError) as exc:
-        raise WorkflowError("invalid_video", f"视频不符合录屏中上传约束：{exc}") from exc
+        raise WorkflowError("invalid_video", f"视频不符合本地检查阈值：{exc}") from exc
     return {
         "duration_seconds": duration, "width": width, "height": height,
         "codec_name": stream.get("codec_name"),
@@ -298,11 +336,11 @@ def inspect_cover(path: Path) -> dict[str, Any]:
     return result
 
 
-def inspect_article(path: Path) -> dict[str, Any]:
+def inspect_article(path: Path, max_bytes: int = 15_000_000) -> dict[str, Any]:
     if path.suffix.lower() != ".docx":
         raise WorkflowError("invalid_article", "article必须是DOCX文件。")
-    if path.stat().st_size > 15_000_000:
-        raise WorkflowError("article_too_large", "DOCX超过录屏中15M导入上限的保守字节阈值。")
+    if path.stat().st_size > max_bytes:
+        raise WorkflowError("article_too_large", f"DOCX超过配置的本地检查阈值{max_bytes}字节。")
     try:
         from lxml import etree
     except ImportError as exc:
@@ -367,10 +405,15 @@ def inspect_article(path: Path) -> dict[str, Any]:
         raise WorkflowError("invalid_article", f"DOCX包结构检查失败：{exc}") from exc
 
 
-def inspect_asset(path: Path, kind: str) -> dict[str, Any]:
+def inspect_asset(path: Path, kind: str, limits: dict[str, Any] | None = None) -> dict[str, Any]:
     before = file_hash(path)
-    metadata = {"video": inspect_video, "cover": inspect_cover,
-                "article": inspect_article}[kind](path)
+    limits = limits or {}
+    if kind == "video":
+        metadata = inspect_video(path, limits.get("video_duration_less_than_seconds", 3600))
+    elif kind == "article":
+        metadata = inspect_article(path, limits.get("docx_conservative_max_bytes", 15_000_000))
+    else:
+        metadata = inspect_cover(path)
     after = file_hash(path)
     if before != after:
         raise WorkflowError("asset_changed", f"检查过程中素材发生变化：{path}")
@@ -378,21 +421,22 @@ def inspect_asset(path: Path, kind: str) -> dict[str, Any]:
             "metadata": metadata}
 
 
-def manifest_payload(config: dict[str, Any]) -> dict[str, Any]:
-    normalized = validate_config(config)
+def manifest_payload(config: dict[str, Any], preserved_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = validate_config(config, preserved_inputs)
     references = [{"path": str(p), "sha256": file_hash(p), "size_bytes": p.stat().st_size}
                   for p in normalized["reference_paths"]]
     paths = normalized["asset_paths"]
     if "video" in paths and any(paths["video"] == p for p in normalized["reference_paths"]):
         raise WorkflowError("reference_as_video", "待发布视频不能是参考操作录屏。")
-    inputs = {kind: inspect_asset(path, kind) for kind, path in paths.items()}
+    inputs = {kind: (preserved_inputs[kind] if preserved_inputs and kind in preserved_inputs
+                     else inspect_asset(path, kind, normalized["upload_limits"])) for kind, path in paths.items()}
     if "video" in inputs and inputs["video"]["sha256"] in {r["sha256"] for r in references}:
         raise WorkflowError("reference_as_video", "待发布视频与参考操作录屏内容相同，即使改名也不能发布。")
     publish_kinds = {
         "video_and_article": ["video", "article"], "video_only": ["video"],
         "article_only": ["article"], "prepare_only": [],
     }[normalized["mode"]]
-    allowed, reason = publish_intent(normalized["authorization"])
+    allowed, reason = publish_intent(normalized["authorization"], set(publish_kinds))
     if not publish_kinds:
         allowed, reason = False, "prepare_only模式禁止commit。"
     return {
@@ -401,8 +445,7 @@ def manifest_payload(config: dict[str, Any]) -> dict[str, Any]:
         "authorization": normalized["authorization"], "settings": normalized["settings"],
         "authorization_check": {"publish_allowed": allowed, "reason": reason},
         "publish_kinds": publish_kinds, "inputs": inputs, "reference_recordings": references,
-        "observed_ui_limits": {"video_duration_less_than_seconds": 3600,
-                               "docx_conservative_max_bytes": 15_000_000},
+        "upload_limits": normalized["upload_limits"],
     }
 
 
@@ -435,7 +478,10 @@ def preparation_note(manifest: dict[str, Any]) -> str:
 
 
 def prepare(config_path: Path, output_dir: Path) -> dict[str, Any]:
-    payload = manifest_payload(read_json(config_path))
+    return save_preparation(config_path, output_dir, manifest_payload(read_json(config_path)))
+
+
+def save_preparation(config_path: Path, output_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
     proposed = {"schema_version": 1, "manifest_id": object_hash(payload),
                 "frozen": payload, "created_at_utc": iso_utc(),
                 "config_file": str(config_path.resolve())}
@@ -533,6 +579,64 @@ def require_unused_submission(state: dict[str, Any], kind: str) -> None:
         raise WorkflowError("already_attempted", "此kind已commit；后续只可record实际回执，不可重试或adopt。")
     if existing_record_adopted(state, kind):
         raise WorkflowError("existing_record_adopted", "此kind已认领线上既有记录；只可record后续回执，不可review、commit或再次adopt。")
+
+
+def refresh(state_path: Path, config_path: Path, output_dir: Path) -> dict[str, Any]:
+    """Revise unsubmitted material/authorization without resetting submission history."""
+    with exclusive_lock(state_path):
+        state = load_state(state_path)
+        old = state["manifest"]["frozen"]
+        config = read_json(config_path)
+        for field in ("account_name", "episode"):
+            if config.get(field) != old[field]:
+                raise WorkflowError("refresh_identity", f"refresh不能更换{field}；请定位正确的本期记录。")
+        locked = {kind for kind in state["items"] if submission_locked(state, kind)}
+        preserved = {kind: old["inputs"][kind] for kind in locked}
+        for kind, asset in preserved.items():
+            if config.get(kind) is not None:
+                candidate = Path(nonempty_string(config[kind], kind))
+                if not candidate.is_absolute() or candidate.resolve() != Path(asset["path"]).resolve():
+                    raise WorkflowError("locked_asset_changed", f"已提交/认领的{kind}不能替换。")
+            config[kind] = asset["path"]
+        payload = manifest_payload(config, preserved)
+        if locked:
+            for field in ("title", "collection", "settings"):
+                if payload[field] != old[field]:
+                    raise WorkflowError("locked_metadata_changed", f"已存在提交/认领，不能改写其{field}。")
+            if payload["inputs"]["cover"]["sha256"] != old["inputs"]["cover"]["sha256"]:
+                raise WorkflowError("locked_asset_changed", "共享封面已用于提交/认领，不能更换其内容。")
+        # A locked item remains in the audit snapshot even when the new scope
+        # only authorizes the other type. Its local file need not still exist.
+        payload["inputs"].update(preserved)
+        if output_dir.exists():
+            raise WorkflowError("refresh_output_exists", "refresh须使用新的预检目录；不覆盖旧清单或重复执行。")
+        prepared = save_preparation(config_path, output_dir, payload)
+        new_manifest_path = Path(prepared["manifest"])
+        new_manifest = read_json(new_manifest_path)
+        previous_path = output_dir / "previous-state.json"
+        write_json(previous_path, state)
+        reset = []
+        for kind in set(state["items"]) | set(payload["publish_kinds"]):
+            if kind not in locked:
+                state["items"][kind] = {"status": "not_attempted", "review": None,
+                                        "attempt": None, "external_observation": None,
+                                        "receipts": []}
+                reset.append(kind)
+        state["events"].append({
+            "action": "refresh", "at_utc": iso_utc(),
+            "previous_manifest_id": state["manifest"]["manifest_id"],
+            "previous_state": str(previous_path.resolve()),
+            "previous_state_sha256": file_hash(previous_path),
+            "preserved_kinds": sorted(locked), "reset_reviews": sorted(reset),
+        })
+        state["manifest"] = new_manifest
+        state["manifest_path"] = str(new_manifest_path.resolve())
+        state["manifest_file_sha256"] = file_hash(new_manifest_path)
+        state["updated_at_utc"] = iso_utc()
+        write_json(state_path, state)
+    return {"command": "refresh", "state": str(state_path.resolve()),
+            "manifest": str(new_manifest_path.resolve()), "preserved_kinds": sorted(locked),
+            "reset_reviews": sorted(reset), "browser_action_performed": False}
 
 
 def check_external_observation(evidence: dict[str, Any], frozen: dict[str, Any], kind: str) -> None:
@@ -651,6 +755,8 @@ def review_state(state_path: Path, kind: str, evidence_path: Path) -> dict[str, 
         state = load_state(state_path)
         item = get_item(state, kind)
         require_unused_submission(state, kind)
+        if kind not in state["manifest"]["frozen"]["publish_kinds"]:
+            raise WorkflowError("kind_not_in_scope", f"当前授权范围不包含{kind}。")
         check_review(evidence, state["manifest"]["frozen"], kind)
         item["review"] = {"evidence": evidence, "recorded_at_utc": iso_utc(),
                           "evidence_file": str(evidence_path.resolve()),
@@ -663,9 +769,11 @@ def review_state(state_path: Path, kind: str, evidence_path: Path) -> dict[str, 
             "reviewed_at": evidence["reviewed_at"]}
 
 
-def verify_frozen_assets(frozen: dict[str, Any]) -> None:
+def verify_frozen_assets(frozen: dict[str, Any], kind_to_submit: str | None = None) -> None:
     reference_hashes = {r["sha256"] for r in frozen.get("reference_recordings", [])}
     for kind, asset in frozen["inputs"].items():
+        if kind_to_submit is not None and kind not in {kind_to_submit, "cover"}:
+            continue
         path = Path(asset["path"])
         if not path.is_file() or file_hash(path) != asset["sha256"]:
             raise WorkflowError("asset_changed", f"冻结素材缺失或SHA256发生变化：{kind}：{path}")
@@ -679,7 +787,9 @@ def commit(state_path: Path, kind: str) -> dict[str, Any]:
         item = get_item(state, kind)
         require_unused_submission(state, kind)
         frozen = state["manifest"]["frozen"]
-        allowed, reason = publish_intent(frozen["authorization"])
+        if kind not in frozen["publish_kinds"]:
+            raise WorkflowError("kind_not_in_scope", f"当前授权范围不包含{kind}。")
+        allowed, reason = publish_intent(frozen["authorization"], {kind})
         if frozen["mode"] == "prepare_only" or not allowed:
             raise WorkflowError("not_authorized", f"不能commit：{reason}")
         if not item.get("review"):
@@ -688,7 +798,7 @@ def commit(state_path: Path, kind: str) -> dict[str, Any]:
         if object_hash(review["evidence"]) != review["evidence_sha256"]:
             raise WorkflowError("review_changed", "review证据与保存时的摘要不一致。")
         check_review(review["evidence"], frozen, kind)
-        verify_frozen_assets(frozen)
+        verify_frozen_assets(frozen, kind)
         check_review(review["evidence"], frozen, kind)
         # Save and fsync the attempted marker BEFORE the agent clicks a web button.
         attempt = {"id": uuid.uuid4().hex, "at_utc": iso_utc(),
@@ -750,8 +860,10 @@ def status_state(state_path: Path) -> dict[str, Any]:
             "submission_locked": submission_locked(state, kind),
             "external_observation": item.get("external_observation"),
         }
-    expected_kinds = frozen["publish_kinds"]
-    result["all_publications_confirmed"] = bool(expected_kinds) and all(
+    expected_kinds = set(frozen["publish_kinds"]) | {
+        kind for kind in state["items"] if submission_locked(state, kind)
+    }
+    result["all_publications_confirmed"] = bool(frozen["publish_kinds"]) and all(
         result["items"].get(kind, {}).get("publication_confirmed", False)
         for kind in expected_kinds
     )
@@ -770,6 +882,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("init", help="初始化状态；不会覆盖/重置已有状态")
     p.add_argument("--manifest", required=True, type=Path)
     p.add_argument("--state", required=True, type=Path)
+    p = sub.add_parser("refresh", help="保留提交历史，仅更新未提交素材/当次授权；须新预检目录")
+    p.add_argument("--state", required=True, type=Path)
+    p.add_argument("--config", required=True, type=Path)
+    p.add_argument("--out", required=True, type=Path)
     for command in ("review", "commit", "record", "status", "adopt"):
         p = sub.add_parser(command)
         p.add_argument("--state", required=True, type=Path)
@@ -786,6 +902,8 @@ def main(argv: list[str] | None = None) -> int:
             result = prepare(args.config.resolve(), args.out.resolve())
         elif args.command == "init":
             result = init_state(args.manifest.resolve(), args.state.resolve())
+        elif args.command == "refresh":
+            result = refresh(args.state.resolve(), args.config.resolve(), args.out.resolve())
         elif args.command == "review":
             result = review_state(args.state.resolve(), args.kind, args.evidence.resolve())
         elif args.command == "adopt":

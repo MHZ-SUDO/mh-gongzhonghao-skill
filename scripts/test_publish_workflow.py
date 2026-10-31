@@ -96,6 +96,23 @@ class WorkflowTests(unittest.TestCase):
         self.prepare()
         workflow.init_state(self.manifest, self.state)
 
+    def refresh(self, name="refreshed"):
+        workflow.write_json(self.config_path, self.config)
+        output = self.case / name
+        return workflow.refresh(self.state, self.config_path, output), output
+
+    def revised_article(self):
+        revised = self.case / "article_revised.docx"
+        with zipfile.ZipFile(self.article) as source, zipfile.ZipFile(
+                revised, "w", compression=zipfile.ZIP_DEFLATED) as target:
+            for member in source.infolist():
+                content = source.read(member.filename)
+                if member.filename == "word/document.xml":
+                    content = content.replace("01 教学正文".encode("utf-8"),
+                                              "01 已核实的修订讲解".encode("utf-8"))
+                target.writestr(member, content)
+        return revised
+
     def evidence(self, name="video", **updates):
         kind = "article" if name == "article" else "video"
         data = {"account": self.config["account_name"], "title": self.config["title"],
@@ -413,6 +430,344 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(sum(e["action"] in {"commit", "adopt"} for e in state["events"]), 1)
         item = state["items"]["video"]
         self.assertNotEqual(item.get("attempt") is not None, item.get("external_observation") is not None)
+
+    def test_refresh_upgrades_draft_without_erasing_history_or_changing_assets(self):
+        self.config["authorization"] = {
+            "requested_action": "prepare", "user_instruction": "只存本期视频和图文草稿",
+        }
+        self.initialize()
+        for kind in ("video", "article"):
+            workflow.review_state(self.state, kind, self.evidence(kind))
+        previous = workflow.load_state(self.state)
+        previous_bytes = self.state.read_bytes()
+        manifest_bytes = self.manifest.read_bytes()
+        hashes = {p: workflow.file_hash(p) for p in (self.video, self.article, self.cover)}
+        self.config["authorization"] = {
+            "requested_action": "publish", "user_instruction": "现在发表本期视频和配套图文",
+        }
+        _, output = self.refresh()
+        current = workflow.load_state(self.state)
+        self.assertEqual(workflow.read_json(output / "previous-state.json"), previous)
+        self.assertEqual((output / "previous-state.json").read_bytes(), previous_bytes)
+        self.assertEqual(self.manifest.read_bytes(), manifest_bytes)
+        self.assertEqual(current["events"][:len(previous["events"])], previous["events"])
+        self.assertEqual(current["events"][-1]["action"], "refresh")
+        self.assertEqual(Path(current["manifest_path"]), (output / "manifest.json").resolve())
+        self.assertEqual(hashes, {p: workflow.file_hash(p) for p in hashes})
+        for kind in ("video", "article"):
+            self.assertIsNone(current["items"][kind]["review"])
+            self.assertIsNone(current["items"][kind]["attempt"])
+        self.assert_error("review_required", workflow.commit, self.state, "video")
+        workflow.review_state(self.state, "video", self.evidence())
+        workflow.commit(self.state, "video")
+
+    def test_refresh_prepare_only_can_enable_only_the_existing_video(self):
+        self.config["mode"] = "prepare_only"
+        self.config["authorization"] = {
+            "requested_action": "prepare", "user_instruction": "检查本期素材，先不要发表",
+        }
+        self.initialize()
+        self.config["mode"] = "video_only"
+        self.config["authorization"] = {
+            "requested_action": "publish", "user_instruction": "现在只发表本期视频",
+        }
+        self.refresh()
+        state = workflow.load_state(self.state)
+        self.assertEqual(state["manifest"]["frozen"]["publish_kinds"], ["video"])
+        self.assert_error("kind_not_in_scope", workflow.review_state, self.state,
+                          "article", self.evidence("article"))
+        self.assert_error("kind_not_in_scope", workflow.commit, self.state, "article")
+        workflow.review_state(self.state, "video", self.evidence())
+        workflow.commit(self.state, "video")
+
+    def test_refresh_narrowed_scope_keeps_old_item_but_cannot_submit_it(self):
+        self.config["authorization"] = {
+            "requested_action": "prepare", "user_instruction": "只保存视频和图文草稿",
+        }
+        self.initialize()
+        workflow.review_state(self.state, "article", self.evidence("article"))
+        self.config["mode"] = "video_only"
+        self.config["authorization"] = {
+            "requested_action": "publish", "user_instruction": "本次只发视频，图文继续保留草稿",
+        }
+        self.refresh()
+        current = workflow.load_state(self.state)
+        self.assertIn("article", current["items"])
+        self.assertIsNone(current["items"]["article"]["review"])
+        self.assert_error("kind_not_in_scope", workflow.review_state, self.state,
+                          "article", self.evidence("article"))
+        self.assert_error("kind_not_in_scope", workflow.commit, self.state, "article")
+        self.assertIsNone(workflow.load_state(self.state)["items"]["article"]["attempt"])
+
+    def test_refresh_revised_article_keeps_published_video_even_when_file_moved(self):
+        self.initialize()
+        for kind in ("video", "article"):
+            workflow.review_state(self.state, kind, self.evidence(kind))
+        workflow.commit(self.state, "video")
+        workflow.record(self.state, "video", "pending", "本地模拟：视频已受理")
+        workflow.record(self.state, "video", "published", "本地模拟：视频现已发表")
+        previous = workflow.load_state(self.state)
+        previous_manifest = self.manifest.read_bytes()
+        self.video.rename(self.case / "published_video_archived.mp4")
+        self.config["article"] = str(self.revised_article())
+        self.refresh()
+        current = workflow.load_state(self.state)
+        self.assertEqual(current["items"]["video"], previous["items"]["video"])
+        self.assertEqual(current["manifest"]["frozen"]["inputs"]["video"],
+                         previous["manifest"]["frozen"]["inputs"]["video"])
+        self.assertEqual(self.manifest.read_bytes(), previous_manifest)
+        self.assertIsNone(current["items"]["article"]["review"])
+        self.assertNotEqual(current["manifest"]["frozen"]["inputs"]["article"]["sha256"],
+                            previous["manifest"]["frozen"]["inputs"]["article"]["sha256"])
+        self.assert_error("already_attempted", workflow.commit, self.state, "video")
+        workflow.review_state(self.state, "article", self.evidence("article"))
+        workflow.commit(self.state, "article")
+        self.assertEqual(workflow.load_state(self.state)["items"]["video"],
+                         previous["items"]["video"])
+
+    def test_refresh_preserves_adopted_record_without_creating_local_attempt(self):
+        self.initialize()
+        workflow.adopt(self.state, "video", self.observation(status="published"))
+        workflow.record(self.state, "video", "published", "本地模拟：再次只读核对原记录")
+        previous = workflow.load_state(self.state)
+        self.config["article"] = str(self.revised_article())
+        self.refresh()
+        current = workflow.load_state(self.state)
+        self.assertEqual(current["items"]["video"], previous["items"]["video"])
+        self.assertIsNone(current["items"]["video"]["attempt"])
+        self.assertFalse(any(e["action"] == "commit" for e in current["events"]))
+        self.assert_error("existing_record_adopted", workflow.commit, self.state, "video")
+        workflow.review_state(self.state, "article", self.evidence("article"))
+        workflow.commit(self.state, "article")
+
+    def test_refresh_identity_changes_are_rejected_without_output_or_state_mutation(self):
+        self.initialize()
+        original = json.loads(json.dumps(self.config))
+        state_bytes, manifest_bytes = self.state.read_bytes(), self.manifest.read_bytes()
+        for field, value in (("account_name", "另一公众号"), ("episode", "04")):
+            with self.subTest(field=field):
+                self.config = json.loads(json.dumps(original))
+                self.config[field] = value
+                output = self.case / f"identity_rejected_{field}"
+                workflow.write_json(self.config_path, self.config)
+                with self.assertRaises(workflow.WorkflowError):
+                    workflow.refresh(self.state, self.config_path, output)
+                self.assertEqual(self.state.read_bytes(), state_bytes)
+                self.assertEqual(self.manifest.read_bytes(), manifest_bytes)
+                self.assertFalse(output.exists())
+
+    def test_refresh_locked_material_or_metadata_cannot_be_rewritten(self):
+        self.initialize()
+        workflow.review_state(self.state, "video", self.evidence())
+        workflow.commit(self.state, "video")
+        original = json.loads(json.dumps(self.config))
+        video_bytes = self.video.read_bytes()
+        state_bytes, manifest_bytes = self.state.read_bytes(), self.manifest.read_bytes()
+        renamed_video = self.case / "same_video_new_path.mp4"
+        renamed_video.write_bytes(video_bytes)
+        other_cover = self.case / "other_cover.png"
+        Image.new("RGB", (320, 180), "green").save(other_cover)
+        changes = [
+            {"title": "重新命名的标题"},
+            {"collection": "另一合集"},
+            {"settings": {**original["settings"], "original_author": "另一作者"}},
+            {"video": str(renamed_video)},
+            {"cover": str(other_cover)},
+        ]
+        for index, updates in enumerate(changes):
+            with self.subTest(updates=updates, index=index):
+                self.config = {**json.loads(json.dumps(original)), **updates}
+                output = self.case / f"locked_rejected_{index}"
+                workflow.write_json(self.config_path, self.config)
+                with self.assertRaises(workflow.WorkflowError):
+                    workflow.refresh(self.state, self.config_path, output)
+                self.assertEqual(self.state.read_bytes(), state_bytes)
+                self.assertEqual(self.manifest.read_bytes(), manifest_bytes)
+                self.assertFalse(output.exists())
+        # Local files may be regenerated after publication. Refresh must not
+        # rewrite what was submitted or turn those changed bytes into a retry.
+        previous = workflow.load_state(self.state)
+        self.config = json.loads(json.dumps(original))
+        self.video.write_bytes(video_bytes + b"regenerated after publication")
+        self.refresh("refresh_with_historical_video")
+        current = workflow.load_state(self.state)
+        self.assertEqual(current["items"]["video"], previous["items"]["video"])
+        self.assertEqual(current["manifest"]["frozen"]["inputs"]["video"],
+                         previous["manifest"]["frozen"]["inputs"]["video"])
+        self.assertNotEqual(workflow.file_hash(self.video),
+                            current["manifest"]["frozen"]["inputs"]["video"]["sha256"])
+        self.assert_error("already_attempted", workflow.commit, self.state, "video")
+
+    def test_refresh_existing_output_is_not_overwritten(self):
+        self.initialize()
+        output = self.case / "existing_refresh_output"
+        output.mkdir()
+        marker = output / "keep.txt"
+        marker.write_bytes(b"unrelated existing evidence")
+        state_bytes, manifest_bytes = self.state.read_bytes(), self.manifest.read_bytes()
+        workflow.write_json(self.config_path, self.config)
+        with self.assertRaises(workflow.WorkflowError):
+            workflow.refresh(self.state, self.config_path, output)
+        self.assertEqual(marker.read_bytes(), b"unrelated existing evidence")
+        self.assertEqual(set(output.iterdir()), {marker})
+        self.assertEqual(self.state.read_bytes(), state_bytes)
+        self.assertEqual(self.manifest.read_bytes(), manifest_bytes)
+
+    def test_refresh_new_authorization_adds_article_without_resetting_submitted_video(self):
+        self.config["mode"] = "video_only"
+        self.initialize()
+        workflow.review_state(self.state, "video", self.evidence())
+        workflow.commit(self.state, "video")
+        previous = workflow.load_state(self.state)
+        self.config["mode"] = "video_and_article"
+        self.config["authorization"] = {
+            "requested_action": "publish", "user_instruction": "视频已经提交，现在再发表本期配套图文",
+        }
+        self.refresh()
+        current = workflow.load_state(self.state)
+        self.assertEqual(current["items"]["video"], previous["items"]["video"])
+        self.assertIn("article", current["items"])
+        self.assertIsNone(current["items"]["article"]["review"])
+        self.assertIsNone(current["items"]["article"]["attempt"])
+        self.assert_error("review_required", workflow.commit, self.state, "article")
+        self.assert_error("already_attempted", workflow.commit, self.state, "video")
+        workflow.review_state(self.state, "article", self.evidence("article"))
+        workflow.commit(self.state, "article")
+        self.assertEqual(workflow.load_state(self.state)["items"]["video"],
+                         previous["items"]["video"])
+
+    def test_single_type_ignores_irrelevant_paths_and_accepts_no_collection_or_author(self):
+        original = json.loads(json.dumps(self.config))
+        cases = (("video_only", "video", "article"),
+                 ("article_only", "article", "video"))
+        for mode, active, inactive in cases:
+            with self.subTest(mode=mode):
+                config = json.loads(json.dumps(original))
+                config["mode"] = mode
+                config[inactive] = "irrelevant_missing_relative_file"
+                config["collection"] = None
+                config["settings"]["original_author"] = None
+                payload = workflow.manifest_payload(config)
+                self.assertEqual(payload["publish_kinds"], [active])
+                self.assertEqual(set(payload["inputs"]), {active, "cover"})
+                self.assertIsNone(payload["collection"])
+                self.assertIsNone(payload["settings"]["original_author"])
+
+    def test_commit_only_rechecks_current_kind_and_shared_cover(self):
+        self.initialize()
+        workflow.review_state(self.state, "video", self.evidence())
+        self.article.write_bytes(b"unsubmitted article is being regenerated")
+        workflow.commit(self.state, "video")
+        state = workflow.load_state(self.state)
+        self.assertIsNotNone(state["items"]["video"]["attempt"])
+        self.assertIsNone(state["items"]["article"]["attempt"])
+        workflow.review_state(self.state, "article", self.evidence("article"))
+        self.assert_error("asset_changed", workflow.commit, self.state, "article")
+
+    def test_refresh_cli_keeps_same_state_and_returns_without_publication(self):
+        self.config["authorization"] = {
+            "requested_action": "prepare", "user_instruction": "先只保存视频和图文草稿",
+        }
+        self.initialize()
+        previous = workflow.load_state(self.state)
+        old_manifest_bytes = self.manifest.read_bytes()
+        self.config["authorization"] = {
+            "requested_action": "publish", "user_instruction": "现在发本期视频和图文",
+        }
+        workflow.write_json(self.config_path, self.config)
+        output = self.case / "cli_refresh"
+        command = [sys.executable, str(Path(workflow.__file__).resolve()), "refresh",
+                   "--state", str(self.state), "--config", str(self.config_path),
+                   "--out", str(output)]
+        result = subprocess.run(command, capture_output=True, text=True,
+                                encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["command"], "refresh")
+        self.assertEqual(workflow.read_json(output / "previous-state.json"), previous)
+        self.assertEqual(self.manifest.read_bytes(), old_manifest_bytes)
+        current = workflow.load_state(self.state)
+        self.assertFalse(any(e["action"] in {"commit", "adopt"} for e in current["events"]))
+        self.assertTrue(all(item["attempt"] is None for item in current["items"].values()))
+
+    def test_configurable_upload_limits_are_recorded_and_actually_enforced(self):
+        article_size = self.article.stat().st_size
+        self.config["upload_limits"] = {
+            "video_duration_less_than_seconds": 1,
+            "docx_conservative_max_bytes": article_size,
+        }
+        payload = workflow.manifest_payload(self.config)
+        self.assertEqual(payload["upload_limits"], self.config["upload_limits"])
+        self.assertGreater(payload["inputs"]["video"]["metadata"]["duration_seconds"], 0)
+        self.config["upload_limits"]["video_duration_less_than_seconds"] = 0.25
+        self.assert_error("invalid_video", workflow.manifest_payload, self.config)
+        self.config["upload_limits"]["video_duration_less_than_seconds"] = 1
+        self.config["upload_limits"]["docx_conservative_max_bytes"] = article_size - 1
+        self.assert_error("article_too_large", workflow.manifest_payload, self.config)
+
+    def test_upload_limits_reject_nonpositive_nonfinite_and_boolean_values(self):
+        invalid = [None, [], {"video_duration_less_than_seconds": 0},
+                   {"video_duration_less_than_seconds": -1},
+                   {"video_duration_less_than_seconds": True},
+                   {"video_duration_less_than_seconds": float("inf")},
+                   {"video_duration_less_than_seconds": float("nan")},
+                   {"docx_conservative_max_bytes": 0},
+                   {"docx_conservative_max_bytes": -1},
+                   {"docx_conservative_max_bytes": True},
+                   {"docx_conservative_max_bytes": 1.5}]
+        for limits in invalid:
+            with self.subTest(limits=limits):
+                config = {**self.config, "upload_limits": limits}
+                self.assert_error("upload_limits", workflow.validate_config, config)
+
+    def test_publish_intent_allows_target_when_only_other_type_is_forbidden(self):
+        cases = [
+            ({"video"}, "现在先发表视频，图文不要发表"),
+            ({"article"}, "本次先发表图文，视频不要发表"),
+            ({"video"}, "Publish the video now; do not publish the article."),
+        ]
+        for kinds, instruction in cases:
+            with self.subTest(kinds=kinds, instruction=instruction):
+                allowed, _ = workflow.publish_intent(
+                    {"requested_action": "publish", "user_instruction": instruction}, kinds,
+                )
+                self.assertTrue(allowed)
+
+    def test_publish_intent_rejects_target_or_unqualified_publication_ban(self):
+        cases = [
+            ({"video"}, "图文可以发表，但视频不要发表"),
+            ({"article"}, "视频可以发表，但不要发表图文"),
+            ({"video"}, "这期先不要发表"),
+            ({"article"}, "不要发表"),
+            ({"video"}, "Do not publish this episode."),
+        ]
+        for kinds, instruction in cases:
+            with self.subTest(kinds=kinds, instruction=instruction):
+                allowed, _ = workflow.publish_intent(
+                    {"requested_action": "publish", "user_instruction": instruction}, kinds,
+                )
+                self.assertFalse(allowed)
+
+    def test_refresh_video_only_with_article_ban_can_submit_video_but_not_article(self):
+        self.config["authorization"] = {
+            "requested_action": "prepare", "user_instruction": "先保存视频和图文草稿",
+        }
+        self.initialize()
+        previous_article = workflow.load_state(self.state)["items"]["article"]
+        self.config["mode"] = "video_only"
+        self.config["authorization"] = {
+            "requested_action": "publish", "user_instruction": "现在先发表视频，图文不要发表",
+        }
+        self.refresh()
+        current = workflow.load_state(self.state)
+        self.assertTrue(current["manifest"]["frozen"]["authorization_check"]["publish_allowed"])
+        self.assertEqual(current["items"]["article"], previous_article)
+        workflow.review_state(self.state, "video", self.evidence())
+        result = workflow.commit(self.state, "video")
+        self.assertEqual(result["status"], "attempted")
+        self.assert_error("kind_not_in_scope", workflow.commit, self.state, "article")
+        current = workflow.load_state(self.state)
+        self.assertIsNotNone(current["items"]["video"]["attempt"])
+        self.assertEqual(current["items"]["article"], previous_article)
 
 
 if __name__ == "__main__":

@@ -35,10 +35,10 @@ description: mh公众号skill：精剪中文课程和技术讲解视频，制作
 
 ## 从制作交接到发表
 
-1. 在本期工作目录完成制作验收，确定实际MP4、PNG、SRT、DOCX及事实/勘误记录。现成终版只检查缺项，不为走流程重新剪辑。
+1. 在本期工作目录完成制作验收，确定实际MP4、PNG、SRT、DOCX及事实/勘误记录。将媒体QA的 `video_sha256`、Word QA的 `docx_sha256` 与当前终版复核，并核对嵌入封面的SHA；哈希改变的文件重做受影响验收，不能拿旧报告证明新版本。记录实际听看与逐页检查范围。现成终版只检查缺项，不为走流程重新剪辑。
 2. 只有本次包含发表或草稿准备时进入后台分支。把**已验收终版的绝对路径**填入 [发布配置](references/example-config.json)，保存当次用户要求原文和对应类型。仅草稿时 `authorization.requested_action` 为 `prepare`；当次已明确要求发表才填 `publish`，不只修改原文而遗漏此字段。发布操作录屏只列入 `reference_recordings`，不能作为讲解视频。
-3. 在技能目录外建立本期发布记录目录。新准备任务运行 `prepare → init` 冻结文件哈希；恢复attempted/pending任务先读原state与线上原稿，不重新初始化。终版在冻结后修改必须重新核验；若已经attempted，进入恢复分支，不重新提交。
-4. 按发布流程检查账号、标题、封面、公式、合集、原创归属和当前页面。默认群发通知OFF、定时OFF；本地既定设置只适用于已确认的该用户系列。
+3. 在技能目录外建立本期发布记录目录。新任务运行 `prepare → init` 冻结文件哈希。已有草稿转正式发表、当次范围改变或未提交终版修订时，用 [refresh](references/checks-and-recovery.md#更新未提交内容与当次授权) 绑定新预检目录并保留原state；未提交项重新预览与review。已attempted/adopt的类型只保留原稿身份、哈希和回执，不被refresh解锁；恢复pending先查原线上记录，不重新prepare/init或新建state。
+4. 按发布流程检查账号、标题、封面、公式、合集、原创归属和当前页面。无合集用 `collection: null` 并跳过关联；无原创作者/不声明原创时用 `settings.original_author: null`，不填写占位词。默认群发通知OFF、定时OFF；本地既定设置只适用于已确认的该用户系列。上传阈值按当前页面核对，脚本历史默认值可由 `upload_limits` 配置。
 5. 仅存草稿时保存并核对状态后交付。真实发表时每种类型分别 `review → commit → 一次网页提交 → record`，发表前读 [检查与恢复](references/checks-and-recovery.md)。
 6. 正常全流程的扫码阶段是登录、视频发表、图文发表。已有登录或已完成某种类型时跳过对应阶段；显示当前有效码、等待手机确认并读取实际回执，不把“三处”当必须凑足的次数。
 

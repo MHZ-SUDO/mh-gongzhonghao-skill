@@ -98,7 +98,22 @@ Constraints: 单张全幅成品，无播放按钮、日期卡片、手机界面�
 
 本技能提供 [scripts/omml.py](../scripts/omml.py)。它是组合结构辅助库，**不解析任意 LaTeX，也不验证数学正确性**。对简单公式可直接组合；复杂矩阵、根式或该库不支持的排版，应采用当前可用且已验证的 OMML 转换/构建方法，再检查结构和实际 Word 渲染。不要用缺失结构的近似文字凑数。
 
+下面两个路径须替换为本机已验证的技能根目录和本期新版本DOCX绝对路径。构建脚本仍放在本期项目目录，通过明确的模块搜索路径复用技能脚本；不要把本期构建脚本或输出写入技能目录。
+
 ```python
+from pathlib import Path
+import sys
+
+skill_dir = Path(r"<本次已验证的技能根目录绝对路径>")
+output_docx = Path(r"<本期新版本DOCX绝对路径>")
+if not skill_dir.is_absolute() or not output_docx.is_absolute():
+    raise ValueError("请先将技能目录和输出DOCX替换为实际绝对路径")
+if not (skill_dir / "scripts" / "omml.py").is_file():
+    raise FileNotFoundError("技能目录中未找到scripts/omml.py")
+if output_docx.exists():
+    raise FileExistsError("请选择尚不存在的新版本DOCX输出路径")
+sys.path.insert(0, str(skill_dir / "scripts"))
+
 from docx import Document
 from omml import text, sub, sup, fraction, integral, insert_equation
 
@@ -107,7 +122,8 @@ doc = Document()
 insert_equation(doc, [sub("E", "k"), "=", fraction("1", "2"), "m", sup("v", "2")])
 # 积分限与积分体是真正结构，d用直立体。
 insert_equation(doc, ["I=", integral("0", "T", ["f(t)", text("d", upright=True), "t"])])
-doc.save("article.docx")
+output_docx.parent.mkdir(parents=True, exist_ok=True)
+doc.save(str(output_docx))
 ```
 
 `sub/sup/subsup`、`fraction`、`delimiter`、`integral`、`equation_array` 可组合。`insert_equation` 支持 python-docx 的 Document 或表格单元格，先验证输入再新增段落，复用节点时深拷贝避免已有公式被移走。返回 Paragraph，可继续设置底色/间距。当前脚本不提供完整公式布局系统；长公式应合理拆行，而不是缩成不可读的小字。
