@@ -2,7 +2,7 @@
 
 ## 能力范围与运行
 
-`scripts/media_tools.py` 只用 Python 标准库；媒体探测/解码另需 `ffprobe`/`ffmpeg` 在当前进程 PATH。它只读源文件，不删除、回收、改名、转写或生成成片。编译结果是给**项目渲染脚本**使用的时间线，不等于视频已经剪好。
+`scripts/media_tools.py` 只用 Python 标准库；媒体探测/解码另需 `ffprobe`/`ffmpeg` 在当前进程 PATH。它只读源文件，不删除、回收、改名、转写或生成成片。编译结果是给**项目渲染脚本**使用的基础时间线，不等于视频已经剪好。基础成片完成后用 [finalize_video.py](../scripts/finalize_video.py) 做一次整体1.25倍，详细命令与最终映射见 [final-speed.md](final-speed.md)。
 
 本机示例先指定解释器与技能路径（其他机器自行替换）：
 
@@ -65,7 +65,7 @@ $lectureSkill = '<本机技能目录>\mh-gongzhonghao-skill'
 - 路径相对于 `project.json` 所在目录；`id` 唯一非空，所有源文件不同且不含字节重复。推荐每个源加 `sha256` 字段，从清点报告取得，编译会检查匹配。
 - `sources` 数组就是已经核对的合并顺序；每源 `spans` 按源时间顺序，完整分割源视频。连删除部分也必须列出，没有空洞/交叠，不允许把尾段漏掉当作完成。
 - 所有区间半开 `[start,end)`，数值以源共同时间零点的秒表示。最后用字符串 `"end"` 避免输入显示时长四舍五入造成越界。开头必须0，每段必须有原因。
-- `speed` 仅整数0、1、2：0删除，1原速，2已确认的无解说加速。其他速度、同一源跨段重排或交叉淡化须扩展渲染器/格式，不能假称该工具已经支持。
+- `speed` 仅整数0、1、2，属于基础精剪层：0删除，1原速，2已确认的无解说加速。最终整体1.25倍是基础成片之后的单独步骤，不把1.25写进此分段字段。其他局部分段速度、同一源跨段重排或交叉淡化须扩展渲染器/格式，不能假称compile已经支持。
 - `fps` 为精确有理数字符串（例如 `"30000/1001"`）；不能用29.97冒充其精确值。`sample_rate` 正整数，`cover_frames` 非负整数。封面0帧表示本次无片头；PNG存在不等于自动渲染了片头。
 
 ```powershell
@@ -110,7 +110,9 @@ $lectureSkill = '<本机技能目录>\mh-gongzhonghao-skill'
 
 这些不是 `compile` 自动执行的字段；项目渲染脚本将勘误区间与每个保留行求交，再按同一映射生成独立标注轨。跨剪口也要覆盖，不能仅靠字幕中点判断。其他例题开始时撤下前例标注。
 
-## 5. 成片技术核验
+## 5. 基础成片与最终倍速成片核验
+
+下面的命令对照基础编译timeline，仅用于整体倍速之前的基础精剪版。最终1.25倍MP4必须改用其 `.finalize.json` 作 `--timeline`，并配最终缩时SRT，完整示例见 [final-speed.md](final-speed.md)。
 
 ```powershell
 & $lecturePython -X utf8 "$lectureSkill\scripts\media_tools.py" verify-media '<成片目录绝对路径>\终版.mp4' --out '<成片目录绝对路径>\qa\media-v1.json' --timeline '<成片目录绝对路径>\work\timeline-v1\timeline.json' --srt '<成片目录绝对路径>\终版.srt' --width 3200 --height 2000 --fps '30/1' --video-codec h264 --audio-codec aac --full-decode

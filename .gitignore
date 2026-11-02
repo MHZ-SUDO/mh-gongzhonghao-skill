@@ -24,3 +24,5 @@ cookies*.json
 *.pdf
 *.zip
 *.skill
+*.finalize.json
+*.decode.log

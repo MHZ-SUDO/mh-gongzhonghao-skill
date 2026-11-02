@@ -4,13 +4,15 @@
 
 可以只做其中一项，也可以“制作后发表”。视频与图文分别记录提交状态；正常新会话由用户完成登录、视频发表、图文发表所需的扫码和手机确认。实际验证次数以当前页面为准。
 
+视频默认先完成精剪，再把整个成片以 **1.25倍** 导出一次：片头、正文、片尾和烧录字幕一起缩时，音频保音高，独立SRT同步。保留基础版，交付和发布使用加速后的终版；详见 [最终倍速流程](references/final-speed.md)。
+
 ## 安装
 
 将本仓库复制到 Codex 的技能目录，文件夹名保持 `mh-gongzhonghao-skill`，确保 `SKILL.md` 直接位于该文件夹内。然后在新会话中使用。
 
 ```powershell
-# 已登录且有本私有仓库访问权限时：
-gh repo clone MHZ-SUDO/mh-gongzhonghao-skill
+# 公开仓库可直接克隆：
+git clone https://github.com/MHZ-SUDO/mh-gongzhonghao-skill.git
 # 将克隆得到的目录放入你的 CODEX_HOME/skills/。
 ```
 
@@ -39,19 +41,20 @@ gh repo clone MHZ-SUDO/mh-gongzhonghao-skill
 | 文件 | 用途 |
 | --- | --- |
 | `scripts/media_tools.py` | 清点、SHA-256、帧时间映射、字幕边界和媒体/DOCX检查 |
+| `scripts/finalize_video.py` | 基础成片整体1.25倍导出、保持音高、同步SRT与映射/验收报告 |
 | `scripts/omml.py` | 组合真正可编辑的Office Math公式，不是任意LaTeX转换器 |
 | `scripts/render_word.py` | 独立隐藏Word实例渲染，保留用户已打开的Word |
 | `scripts/publish_workflow.py` | 冻结素材与逐类型提交状态，防止超时后重复提交 |
 | `scripts/test_publish_workflow.py` | 独立临时夹具验证发布状态机制，不发表真实内容 |
 
-脚本不会自动判断剪辑语义、生成成片、操作网页或代替扫码。实际任务仍需由具备对应工具的助手执行并核验结果。
+脚本不会自动判断剪辑语义、转写、操作网页或代替扫码；finalize_video仅对已完成剪辑的视频做最终倍速渲染。实际任务仍需由具备对应工具的助手执行并核验结果。
 
 草稿转正式发表、未提交内容修改或本次类型范围变化时，使用 `refresh --state ... --config ... --out <新的预检目录>` 保留原记录，不删state重开。已提交类型继续锁定，未提交类型重新核验。无合集/无原创作者可用JSON `null`；只发一种类型不会检查另一种素材。上传阈值可用 `upload_limits` 按当前后台说明配置，历史默认值不代表当前平台规则。
 
-运行本地发布回归检查：
+运行本地倍速导出与发布回归检查（使用短合成素材，不发表真实内容）：
 
 ```powershell
-python -X utf8 -m unittest discover -s scripts -p test_publish_workflow.py -v
+python -X utf8 -m unittest discover -s scripts -p "test_*.py" -v
 ```
 
 本仓库由原 `mh-video-word` 与 `wechat-lecture-publish` 合并而来，保留两部分可复用脚本、系列样图及历史案例。历史发表状态只代表当时观察，不是今天的线上状态。
