@@ -179,6 +179,29 @@ class FinalizeTests(unittest.TestCase):
                 self.assertNotIn('Traceback', result.stderr)
                 self.assertFalse(output.exists())
 
+    def test_rejects_chapter_metadata_before_encoding_without_changing_source(self):
+        metadata = self.output('chapters.ffmetadata')
+        metadata.write_text(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Example chapter\n',
+                            encoding='utf-8')
+        chapter_video = self.output('base-with-chapter.mp4')
+        subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-v', 'error', '-i', str(self.source),
+                        '-i', str(metadata), '-map', '0', '-map_metadata', '1', '-map_chapters', '1',
+                        '-c', 'copy', str(chapter_video)], check=True)
+        actual = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_chapters',
+                                                      '-of', 'json', str(chapter_video)]))
+        self.assertTrue(actual['chapters'])
+        original_hash = finalizer.sha256(chapter_video)
+        output = self.output('chapter-rejected.mp4')
+        original_run = subprocess.run
+        with patch.object(finalizer.subprocess, 'run', wraps=original_run) as calls:
+            with self.assertRaisesRegex(ValueError, 'does not retime chapters'):
+                finalizer.finalize(chapter_video, output, srt=self.srt)
+        self.assertFalse(any('-filter_complex' in call.args[0] for call in calls.call_args_list))
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_suffix('.srt').exists())
+        self.assertFalse(output.with_suffix('.finalize.json').exists())
+        self.assertEqual(finalizer.sha256(chapter_video), original_hash)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

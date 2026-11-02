@@ -45,11 +45,13 @@ def tool(name):
 
 def probe(path):
     result = subprocess.run([tool("ffprobe"), "-v", "error", "-show_format",
-                             "-show_streams", "-of", "json", str(path)],
+                             "-show_streams", "-show_chapters", "-of", "json", str(path)],
                             capture_output=True, text=True, encoding="utf-8", timeout=60)
     if result.returncode:
         raise ValueError(f"ffprobe failed: {result.stderr.strip()}")
     data = json.loads(result.stdout)
+    if data.get("chapters"):
+        raise ValueError("Remove chapter metadata from the base edit first; this helper does not retime chapters")
     videos = [s for s in data["streams"] if s["codec_type"] == "video"
               and not s.get("disposition", {}).get("attached_pic")]
     audio = [s for s in data["streams"] if s["codec_type"] == "audio"]
