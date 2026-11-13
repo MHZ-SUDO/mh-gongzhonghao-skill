@@ -55,6 +55,7 @@ description: mh公众号skill：精剪中文课程和技术讲解视频，制作
 | 媒体脚本、时间线JSON与命令 | [project-format.md](references/project-format.md) |
 | 精剪完成后整体1.25倍、字幕同步与终版验收 | [final-speed.md](references/final-speed.md) |
 | 公众号操作、扫码、文档导入与预览 | [publishing-workflow.md](references/publishing-workflow.md)，[publishing-runbook.md](references/publishing-runbook.md) |
+| 后台元素定位、按钮点不动、验证码过期、封面裁剪、判断发表成功 | [backstage-automation.md](references/backstage-automation.md) |
 | 发布检查、状态命令与异常恢复 | [checks-and-recovery.md](references/checks-and-recovery.md) |
 | 平台实录、默认设置的适用范围 | [profile-and-evidence.md](references/profile-and-evidence.md) |
 | 历史纠错经验，避免照搬第三期参数 | [episode-03-case.md](references/episode-03-case.md) |
